@@ -16,5 +16,5 @@ This userscript provides support for AI (GPT) ATC "simulation" using the free Pu
  - ATC may hallucinate, so don't rely too much on their navigation. While they know their position and your aircraft position (and other params like speed, heading, altitude), they don't know how many runways the airport has, nor the orientation of the runways, so they will always guide you directly to the runway. You can tell them you want to land on e.g. rwy 12 and only then they might give you proper vectors.
 
 
-Requirements
-Tampermonkey
+# Requirements
+ - Tampermonkey
