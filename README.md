@@ -11,9 +11,31 @@ This userscript provides support for AI (GPT) ATC "simulation" using the free Pu
  - AUTO mode will base the ATC mode about your altitude. 
  - Every day there is a new controller working at each airport
 
+# Updates Improvements
+
+  # 2.0
+  - ATC AI now support GeoFS 3.9
+
+  # 2.0.1
+  - Adding ATC modes (TWR, GND, DEP and APP buttons
+  - Adding multilingual (FR/EN) ATC
+
+  # 2.0.2
+  - Adding 100 most importants runways to the ATC. Find de list below.
+  - Improve procedures
+  - Improve ATC with real time traffic on GeoFs
+  - Improve ATC navigation orders based on the GeoFS flight plan
+
+    - List of airports accepted on GeoFS ATC AI :
+    - North America: JFK, LAX, SFO, ORD, DFW, ATL, DEN, MIA, BOS, YYZ, YVR, YUL, MEX, CUN, HNL, ANC, SEA, PDX, LAS, PHX, IAH, DCA, EWR, LGA, MDW, MSP, PHL, CLT, SAN, AUS, BNA, MEM
+    - Europe: LHR, CDG, FRA, MAD, FCO, VIE, AMS, LGW, TXL, MUC, ZRH, BRU, GVA, ARN, CPH, OSL, HEL, DUB, BCN, LIS, ATH, IST, SNN, CWL, EDI, GLA, MAN, BHX, LBA, EMA, LPL, NCL, SOU, BRS, EXT, NQY, GCI, JSY, IOM, PIK, INV, ABZ, BEB, SYY, TIR, ILY, BRR
+    - Asia: HND, PVG, ICN, BKK, SIN, KUL, MNL, CGK, DEL, BOM, DXB, AUH, RUH, JED, TLV, HKG, NRT, ZBB, UUS, UDD
+    - South America: GIG, GRU, AEP, LIM, BOG, CCS, AKL, CHC, NAN, SYD
+    - Caraïbean & Central America: CUN, MBJ, NAS, BGI, AUA, CUR, POS, PTY, SJO, MGA, BZE, GUA, SAL, TGU, HAV, SDQ, PAP, SJU, BDA, RKV
+
+
 # Known issues
  - The ATC will never contact you first. If ATC tells you to wait for instructions, you will have to ask them for updates every couple (10-20) seconds.
- - ATC may hallucinate, so don't rely too much on their navigation. While they know their position and your aircraft position (and other params like speed, heading, altitude), they don't know how many runways the airport has, nor the orientation of the runways, so they will always guide you directly to the runway. You can tell them you want to land on e.g. rwy 12 and only then they might give you proper vectors.
 
 
 # Requirements
