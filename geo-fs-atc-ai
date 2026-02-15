@@ -15,6 +15,7 @@
 // @resource     runways https://raw.githubusercontent.com/avogadro16/GEOFS_ATC_AI/main/runways.json
 // ==/UserScript==
 
+
 (function() {
     'use strict';
 
@@ -92,17 +93,16 @@
         airports = JSON.parse(data);
     });
 
-    // Load runways from GitHub resource
-    GM.getResourceText("runways").then((data) => {
-        try {
-            runways = JSON.parse(data);
-            console.log("Loaded runways database from GitHub with " + Object.keys(runways).length + " airports");
-        } catch(e) {
-            console.log("Could not parse runways resource:", e);
-        }
-    }).catch(e => {
-        console.log("Could not load runways resource:", e);
-    });
+    // Load runways from GitHub using fetch
+    fetch('https://raw.githubusercontent.com/avogadro16/GEOFS_ATC_AI/main/runways.json')
+        .then(r => r.json())
+        .then(data => {
+            runways = data;
+            console.log("✓ Loaded runways database from GitHub with " + Object.keys(runways).length + " airports");
+        })
+        .catch(e => {
+            console.log("✗ Could not load runways from GitHub:", e);
+        });
 
     let radiostatic;
     GM.getResourceUrl("radiostatic").then((data) => {
@@ -595,25 +595,54 @@
             return Promise.resolve(metarCache[airportCode]);
         }
 
-        return fetch(`https://avwx.rest/api/metar/${airportCode}?options=info`)
+        // Try multiple METAR APIs with fallback
+        return fetch(`https://api.checkwx.com/metar/${airportCode}/decoded`)
             .then(r => r.json())
             .then(data => {
-                metarCache[airportCode] = data;
-                return data;
+                if (data.results && data.results.length > 0) {
+                    let metar = data.results[0];
+                    metarCache[airportCode] = metar;
+                    console.log("✓ METAR loaded for " + airportCode);
+                    return metar;
+                }
+                return null;
             })
             .catch(e => {
-                console.log("Could not fetch METAR for " + airportCode);
-                return null;
+                console.log("✗ Could not fetch METAR for " + airportCode + " from CheckWX, trying fallback...");
+                // Fallback to avwx
+                return fetch(`https://avwx.rest/api/metar/${airportCode}?options=info`)
+                    .then(r => r.json())
+                    .then(data => {
+                        metarCache[airportCode] = data;
+                        console.log("✓ METAR loaded for " + airportCode + " (fallback)");
+                        return data;
+                    })
+                    .catch(e2 => {
+                        console.log("✗ Could not fetch METAR for " + airportCode);
+                        return null;
+                    });
             });
     }
 
     function getWindDirectionFromMETAR(metar) {
-        if (!metar || !metar.wind_direction) return null;
-        return metar.wind_direction.value;
+        if (!metar) return null;
+        
+        // CheckWX format
+        if (metar.wind && metar.wind.degrees) {
+            return metar.wind.degrees;
+        }
+        
+        // AVWX format
+        if (metar.wind_direction && metar.wind_direction.value) {
+            return metar.wind_direction.value;
+        }
+        
+        return null;
     }
 
     function getBestRunway(airportRunways, windDirection) {
         if (!airportRunways || airportRunways.length === 0) {
+            console.log("No runways available");
             return null;
         }
 
@@ -621,6 +650,8 @@
         let minDifference = 180;
 
         for (let runway of airportRunways) {
+            if (!runway.heading) continue;
+            
             let diff = Math.abs(runway.heading - windDirection);
             if (diff > 180) {
                 diff = 360 - diff;
@@ -632,6 +663,7 @@
             }
         }
 
+        console.log("✓ Best runway: " + bestRunway.number + " (heading " + bestRunway.heading + "°, wind diff: " + minDifference + "°)");
         return bestRunway;
     }
 
@@ -691,6 +723,11 @@
             
             // Get runways from GitHub database
             let airportRunways = runways[airport.code] ? runways[airport.code].runways : null;
+            
+            console.log("Airport: " + airport.code);
+            console.log("Wind direction: " + windDirection);
+            console.log("Airport runways: " + (airportRunways ? airportRunways.length + " runways" : "none"));
+            
             let bestRunway = (windDirection && airportRunways) ? getBestRunway(airportRunways, windDirection) : null;
             let runwayInfo = bestRunway ? `Runway ${bestRunway.number} (heading ${bestRunway.heading}°)` : 'runway information not available';
 
@@ -804,4 +841,3 @@
     }
 
 })();
-
