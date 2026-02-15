@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GeoFS AI ATC - Multilingual with Mode Selection
-// @namespace    
-// @version      2.0.1
-// @description  AI ATC for GeoFS using free PuterJS GPT API with ATC Mode & Language Selection
+// @name         GeoFS AI ATC - Multimode and Multilingual ATC with Flight Plan & Traffic
+// @namespace    https://github.com/avogadro16/GEOFS_ATC_AI
+// @version      2.0.2
+// @description  AI ATC with flight plan navigation, traffic detection, and realistic procedures
 // @author       Base Nemanja Avramovic Upgrades avogadro16
 // @license      MIT
 // @match        https://www.geo-fs.com/geofs.php*
@@ -12,12 +12,13 @@
 // @grant        GM.xmlHttpRequest
 // @resource     airports https://github.com/avramovic/geofs-ai-atc/raw/master/airports.json
 // @resource     radiostatic https://github.com/avramovic/geofs-ai-atc/raw/master/radio-static.mp3
+// @resource     runways https://raw.githubusercontent.com/avogadro16/GEOFS_ATC_AI/main/runways.json
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // Add custom styles for ATC mode buttons and language selector
+    // Add custom styles
     const customCSS = document.createElement('style');
     customCSS.textContent = `
         .geofs-atc-mode-btn {
@@ -84,8 +85,23 @@
     }
 
     let airports;
+    let runways = {};
+    let metarCache = {};
+    
     GM.getResourceText("airports").then((data) => {
         airports = JSON.parse(data);
+    });
+
+    // Load runways from GitHub resource
+    GM.getResourceText("runways").then((data) => {
+        try {
+            runways = JSON.parse(data);
+            console.log("Loaded runways database from GitHub with " + Object.keys(runways).length + " airports");
+        } catch(e) {
+            console.log("Could not parse runways resource:", e);
+        }
+    }).catch(e => {
+        console.log("Could not load runways resource:", e);
     });
 
     let radiostatic;
@@ -102,6 +118,19 @@
     let selectedLanguage = 'EN';
     let modeButtonsCreated = false;
     let languageButtonsCreated = false;
+    
+    // Flight state tracking
+    let flightState = {
+        phase: 'PARKING',
+        departureAirport: null,
+        arrivalAirport: null,
+        flightPlan: null,
+        cruiseAltitude: 10000,
+        assignedAltitude: null,
+        assignedHeading: null,
+        lastNavUpdate: 0,
+        navUpdateInterval: 30000
+    };
 
     const languageConfig = {
         EN: {
@@ -152,7 +181,6 @@
         const menuList = document.querySelector('div.geofs-ui-bottom');
 
         if (menuList && !menuList.querySelector('.geofs-atc-icon')) {
-            // Create language buttons first
             if (!languageButtonsCreated) {
                 const languages = ['EN', 'FR'];
                 languages.forEach(lang => {
@@ -176,7 +204,6 @@
                 languageButtonsCreated = true;
             }
 
-            // Create mode buttons
             if (!modeButtonsCreated) {
                 const modes = ['AUTO', 'GROUND', 'TOWER', 'APPROACH', 'DEPARTURE'];
                 modes.forEach(mode => {
@@ -410,10 +437,8 @@
         let voices = synth.getVoices();
         let toSpeak = new SpeechSynthesisUtterance(text);
         
-        // Select voice based on language
         if (selectedLanguage === 'FR') {
             toSpeak.lang = 'fr-FR';
-            // Try to find a French voice
             for (let voice of voices) {
                 if (voice.lang.includes('fr')) {
                     toSpeak.voice = voice;
@@ -449,7 +474,7 @@
         vNotify.success({text: text, title: airplane.name+': '+callsign, visibleDuration: 10000});
     }
 
-     function isOnGround() {
+    function isOnGround() {
         return unsafeWindow.geofs.animation.values.groundContact === 1;
     }
 
@@ -495,6 +520,121 @@
         }
     }
 
+    function getFlightPlan() {
+        try {
+            if (unsafeWindow.geofs.flightPlan && unsafeWindow.geofs.flightPlan.waypoints) {
+                return unsafeWindow.geofs.flightPlan.waypoints;
+            }
+            if (unsafeWindow.geofs.navigation && unsafeWindow.geofs.navigation.flightPlan) {
+                return unsafeWindow.geofs.navigation.flightPlan;
+            }
+        } catch(e) {
+            console.log("Could not access flight plan:", e);
+        }
+        return null;
+    }
+
+    function getNearbyTraffic(maxDistance = 10) {
+        let nearbyAircraft = [];
+        try {
+            if (unsafeWindow.geofs.players && unsafeWindow.geofs.players.list) {
+                for (let player of unsafeWindow.geofs.players.list) {
+                    if (player && player.position) {
+                        let distance = haversine(
+                            unsafeWindow.geofs.aircraft.instance.lastLlaLocation[0],
+                            unsafeWindow.geofs.aircraft.instance.lastLlaLocation[1],
+                            player.position[0],
+                            player.position[1]
+                        );
+                        
+                        if (distance < maxDistance && distance > 0) {
+                            nearbyAircraft.push({
+                                name: player.name || 'Unknown',
+                                distance: distance,
+                                altitude: player.position[2] || 0,
+                                heading: player.heading || 0
+                            });
+                        }
+                    }
+                }
+            }
+        } catch(e) {
+            console.log("Could not access traffic:", e);
+        }
+        return nearbyAircraft;
+    }
+
+    function updateFlightState() {
+        let speed = unsafeWindow.geofs.animation.values.kias || 0;
+        let altitude = seaAltitude();
+        let onGround = isOnGround();
+
+        if (onGround && speed < 5) {
+            flightState.phase = 'PARKING';
+        } else if (onGround && speed >= 5 && speed < 20) {
+            flightState.phase = 'PUSHBACK';
+        } else if (onGround && speed >= 20 && speed < 50) {
+            flightState.phase = 'TAXI_OUT';
+        } else if (speed >= 50 && altitude < 1000) {
+            flightState.phase = 'TAKEOFF';
+        } else if (!onGround && altitude < flightState.cruiseAltitude - 1000) {
+            flightState.phase = 'CLIMB';
+        } else if (!onGround && Math.abs(altitude - flightState.cruiseAltitude) <= 1000) {
+            flightState.phase = 'CRUISE';
+        } else if (!onGround && altitude > flightState.cruiseAltitude - 1000 && altitude < flightState.cruiseAltitude) {
+            flightState.phase = 'DESCENT';
+        } else if (!onGround && altitude < 2000) {
+            flightState.phase = 'APPROACH';
+        } else if (onGround && speed > 0) {
+            flightState.phase = 'TAXI_IN';
+        }
+    }
+
+    function fetchMETAR(airportCode) {
+        if (metarCache[airportCode]) {
+            return Promise.resolve(metarCache[airportCode]);
+        }
+
+        return fetch(`https://avwx.rest/api/metar/${airportCode}?options=info`)
+            .then(r => r.json())
+            .then(data => {
+                metarCache[airportCode] = data;
+                return data;
+            })
+            .catch(e => {
+                console.log("Could not fetch METAR for " + airportCode);
+                return null;
+            });
+    }
+
+    function getWindDirectionFromMETAR(metar) {
+        if (!metar || !metar.wind_direction) return null;
+        return metar.wind_direction.value;
+    }
+
+    function getBestRunway(airportRunways, windDirection) {
+        if (!airportRunways || airportRunways.length === 0) {
+            return null;
+        }
+
+        let bestRunway = airportRunways[0];
+        let minDifference = 180;
+
+        for (let runway of airportRunways) {
+            let diff = Math.abs(runway.heading - windDirection);
+            if (diff > 180) {
+                diff = 360 - diff;
+            }
+
+            if (diff < minDifference) {
+                minDifference = diff;
+                bestRunway = runway;
+            }
+        }
+
+        return bestRunway;
+    }
+
     setInterval(function() {
         let airport = findNearestAirport();
         let airportMeta = airports[airport.code];
@@ -509,6 +649,8 @@
     }, 500);
 
     function callAtc(pilotMsg) {
+        updateFlightState();
+        
         let airport = {
             distance: findAirportDistance(tunedInAtc),
             code: tunedInAtc,
@@ -540,89 +682,126 @@
             lon: unsafeWindow.geofs.mainAirportList[airport.code][1],
         };
 
-        if (typeof context[airport.code] === "undefined") {
-            let season = unsafeWindow.geofs.animation.values.season;
-            let daynight = unsafeWindow.geofs.animation.values.night ? (selectedLanguage === 'FR' ? 'nuit' : 'night') : (selectedLanguage === 'FR' ? 'jour' : 'day');
-            if (unsafeWindow.geofs.isSnow || unsafeWindow.geofs.isSnowy) {
-                daynight = (selectedLanguage === 'FR' ? 'nuit enneigée' : 'snowy night');
+        let flightPlan = getFlightPlan();
+        let nearbyTraffic = getNearbyTraffic(15);
+
+        // Fetch METAR
+        fetchMETAR(airport.code).then(metar => {
+            let windDirection = metar ? getWindDirectionFromMETAR(metar) : null;
+            
+            // Get runways from GitHub database
+            let airportRunways = runways[airport.code] ? runways[airport.code].runways : null;
+            let bestRunway = (windDirection && airportRunways) ? getBestRunway(airportRunways, windDirection) : null;
+            let runwayInfo = bestRunway ? `Runway ${bestRunway.number} (heading ${bestRunway.heading}°)` : 'runway information not available';
+
+            if (typeof context[airport.code] === "undefined") {
+                let season = unsafeWindow.geofs.animation.values.season;
+                let daynight = unsafeWindow.geofs.animation.values.night ? (selectedLanguage === 'FR' ? 'nuit' : 'night') : (selectedLanguage === 'FR' ? 'jour' : 'day');
+                if (unsafeWindow.geofs.isSnow || unsafeWindow.geofs.isSnowy) {
+                    daynight = (selectedLanguage === 'FR' ? 'nuit enneigée' : 'snowy night');
+                }
+
+                let atcMode = getAtcMode();
+                let languageInstruction = selectedLanguage === 'FR' 
+                    ? 'Vous répondrez en français. '
+                    : 'You will respond in English. ';
+                
+                let runwayList = airportRunways ? airportRunways.map(r => `${r.number} (${r.heading}°)`).join(', ') : 'unknown';
+                
+                let trafficInfo = nearbyTraffic.length > 0 
+                    ? 'Nearby traffic: ' + nearbyTraffic.map(a => `${a.name} at ${a.distance.toFixed(1)} nm, altitude ${a.altitude.toFixed(0)} ft`).join('; ') + '. '
+                    : '';
+
+                let flightPlanInfo = flightPlan && flightPlan.length > 0
+                    ? 'Flight plan: ' + flightPlan.slice(0, 5).map(wp => wp.name || wp.code || 'waypoint').join(' -> ') + '. '
+                    : '';
+
+                let intro = 'You are '+controller.name.first+' '+controller.name.last+', a '+controller.dob.age+' years old '+controller.gender+' ATC controller on the '+apName+' for today. ' +
+                    'Your airport location is (lat: '+airportPosition.lat+', lon: '+airportPosition.lon+'). You are talking to pilot whose name is '+pilot.name+' callsign ('+pilot.callsign+') and they\'ve been piloting since '+pilot.licensed_at+'. ' +
+                    'You are currently working as '+atcMode+' controller. ' +
+                    'Current flight phase: '+flightState.phase+'. ' +
+                    (airportRunways ? 'The available runways at this airport are: '+runwayList+'. ' : '') +
+                    (bestRunway ? 'Based on current wind conditions, runway '+bestRunway.number+' is in use. ' : '') +
+                    trafficInfo +
+                    flightPlanInfo +
+                    languageInstruction +
+                    'You will be acting as ground, tower (if the plane is below or at 5000 ft) or approach or departure (if above 5000 ft), depending on whether the plane is on the ground, their distance from the airport, heading and previous context. ' +
+                    'If the aircraft is in the air, keep your communication short and concise, as a real ATC. If they\'re on the ground, your replies should still be short (1-2 sentence per reply), but you can ' +
+                    'use a more relaxed communication like making jokes, discussing weather, other traffic etc. If asked why so slow on replies, say you\'re busy, like the real ATC. ' +
+                    'Guide the pilot according to their flight plan when possible. If there is nearby traffic, warn them and provide alternative headings or altitudes if needed. '+
+                    'Today is '+date+', time is '+time+', a beautiful '+season+' '+daynight;
+
+                context[airport.code] = [];
+                context[airport.code].push({content: intro, role: 'system'});
+            }
+
+            let airplane = unsafeWindow.geofs.aircraft.instance.aircraftRecord;
+            let aircraftPosition = {
+                lat: unsafeWindow.geofs.aircraft.instance.lastLlaLocation[0],
+                lon: unsafeWindow.geofs.aircraft.instance.lastLlaLocation[1],
+            };
+
+            let onGround = isOnGround() ? (selectedLanguage === 'FR' ? 'au sol' : 'on the ground') : (selectedLanguage === 'FR' ? 'en l\'air' : 'in the air');
+            let distance;
+
+            if (airport.distance > 1) {
+                let relativeDirection = getRelativeDirection(airportPosition.lat, airportPosition.lon, aircraftPosition.lat, aircraftPosition.lon);
+                distance = airport.distance+' ' + (selectedLanguage === 'FR' ? 'milles nautiques' : 'nautical miles') + ' '+relativeDirection+' ' + (selectedLanguage === 'FR' ? 'de l\'aéroport' : 'from the airport');
+            } else if (isOnGround()) {
+                distance = selectedLanguage === 'FR' ? 'à l\'aéroport' : 'at the airport';
+            } else {
+                distance = selectedLanguage === 'FR' ? 'au-dessus de l\'aéroport' : 'above the airport';
+            }
+
+            let movingSpeed;
+            if (isOnGround()) {
+                if (unsafeWindow.geofs.animation.values.kias > 1) {
+                    movingSpeed = (selectedLanguage === 'FR' ? 'se déplaçant à ' : 'moving at ') + unsafeWindow.geofs.animation.values.kias+' kts'
+                } else {
+                    movingSpeed = selectedLanguage === 'FR' ? 'stationnaire' : 'stationary';
+                }
+            } else {
+                movingSpeed = (selectedLanguage === 'FR' ? 'volant à ' : 'flying at ') + unsafeWindow.geofs.animation.values.kias+' kts, ' + (selectedLanguage === 'FR' ? 'cap ' : 'heading ') + unsafeWindow.geofs.animation.values.heading360;
             }
 
             let atcMode = getAtcMode();
-            let languageInstruction = selectedLanguage === 'FR' 
-                ? 'Vous répondrez en français. '
-                : 'You will respond in English. ';
-            
-            let intro = 'You are '+controller.name.first+' '+controller.name.last+', a '+controller.dob.age+' years old '+controller.gender+' ATC controller on the '+apName+' for today. ' +
-                'Your airport location is (lat: '+airportPosition.lat+', lon: '+airportPosition.lon+'). You are talking to pilot whose name is '+pilot.name+' callsign ('+pilot.callsign+') and they\'ve been piloting since '+pilot.licensed_at+'. ' +
-                'You are currently working as '+atcMode+' controller. ' +
-                languageInstruction +
-                'You will be acting as ground, tower (if the plane is below or at 5000 ft) or approach or departure (if above 5000 ft), depending on whether the plane is on the ground, their distance from the airport, heading and previous context. ' +
-                'If the aircraft is in the air, keep your communication short and concise, as a real ATC. If they\'re on the ground, your replies should still be short (1-2 sentence per reply), but you can ' +
-                'use a more relaxed communication like making jokes, discussing weather, other traffic etc. If asked why so slow on replies, say you\'re busy, like the real ATC. '+
-                'Today is '+date+', time is '+time+', a beautiful '+season+' '+daynight;
+            let address = pilot.callsign+', '+airport.code+' '+atcMode;
 
-            context[airport.code] = [];
-            context[airport.code].push({content: intro, role: 'system'});
-        }
-
-        let airplane = unsafeWindow.geofs.aircraft.instance.aircraftRecord;
-        let aircraftPosition = {
-            lat: unsafeWindow.geofs.aircraft.instance.lastLlaLocation[0],
-            lon: unsafeWindow.geofs.aircraft.instance.lastLlaLocation[1],
-        };
-
-        let onGround = isOnGround() ? (selectedLanguage === 'FR' ? 'au sol' : 'on the ground') : (selectedLanguage === 'FR' ? 'en l\'air' : 'in the air');
-        let distance;
-
-        if (airport.distance > 1) {
-            let relativeDirection = getRelativeDirection(airportPosition.lat, airportPosition.lon, aircraftPosition.lat, aircraftPosition.lon);
-            distance = airport.distance+' ' + (selectedLanguage === 'FR' ? 'milles nautiques' : 'nautical miles') + ' '+relativeDirection+' ' + (selectedLanguage === 'FR' ? 'de l\'aéroport' : 'from the airport');
-        } else if (isOnGround()) {
-            distance = selectedLanguage === 'FR' ? 'à l\'aéroport' : 'at the airport';
-        } else {
-            distance = selectedLanguage === 'FR' ? 'au-dessus de l\'aéroport' : 'above the airport';
-        }
-
-        let movingSpeed;
-        if (isOnGround()) {
-            if (unsafeWindow.geofs.animation.values.kias > 1) {
-                movingSpeed = (selectedLanguage === 'FR' ? 'se déplaçant à ' : 'moving at ') + unsafeWindow.geofs.animation.values.kias+' kts'
-            } else {
-                movingSpeed = selectedLanguage === 'FR' ? 'stationnaire' : 'stationary';
+            if (airplane.name.toLowerCase().includes('cessna') || airplane.name.toLowerCase().includes('piper')) {
+                address = airplane.name + ' ' + address;
             }
-        } else {
-            movingSpeed = (selectedLanguage === 'FR' ? 'volant à ' : 'flying at ') + unsafeWindow.geofs.animation.values.kias+' kts, ' + (selectedLanguage === 'FR' ? 'cap ' : 'heading ') + unsafeWindow.geofs.animation.values.heading360;
-        }
 
-        let atcMode = getAtcMode();
-        let address = pilot.callsign+', '+airport.code+' '+atcMode;
+            let relativeWindDirection = unsafeWindow.geofs.animation.values.relativeWind;
+            let windDirection_val = (unsafeWindow.geofs.animation.values.heading360 + relativeWindDirection + 360) % 360;
+            let wind = unsafeWindow.geofs.animation.values.windSpeedLabel + ', ' + (selectedLanguage === 'FR' ? 'direction ' : 'direction ') + windDirection_val + ' ' + (selectedLanguage === 'FR' ? 'degrés' : 'degrees');
 
-        if (airplane.name.toLowerCase().includes('cessna') || airplane.name.toLowerCase().includes('piper')) {
-            address = airplane.name + ' ' + address;
-        }
+            let trafficWarning = nearbyTraffic.length > 0 
+                ? 'WARNING: Nearby traffic detected: ' + nearbyTraffic.map(a => `${a.name} at ${a.distance.toFixed(1)} nm`).join(', ') + '. '
+                : '';
 
-        let relativeWindDirection = unsafeWindow.geofs.animation.values.relativeWind;
-        let windDirection = (unsafeWindow.geofs.animation.values.heading360 + relativeWindDirection + 360) % 360;
-        let wind = unsafeWindow.geofs.animation.values.windSpeedLabel + ', ' + (selectedLanguage === 'FR' ? 'direction ' : 'direction ') + windDirection + ' ' + (selectedLanguage === 'FR' ? 'degrés' : 'degrees');
+            let currentUpdate = 'Date and time: '+date+' '+time+'. '+
+                'Flight phase: '+flightState.phase+'. '+
+                'The pilot is flying '+airplane.name+' and their position is '+onGround+' '+distance+'. The altitude of the aircraft is '+seaAltitude()+' feet above the sea level ('+groundAltitude()+' feet above ground). ' +
+                'The plane is '+movingSpeed+'. Wind speed is '+wind+'. Air temperature is '+unsafeWindow.geofs.animation.values.airTemp+' degrees celsius. ' +
+                'Current runway in use: '+runwayInfo+'. '+
+                trafficWarning +
+                'You should address them with "'+address+'", followed by the message.';
 
-        let currentUpdate = 'Date and time: '+date+' '+time+'. '+
-            'The pilot is flying '+airplane.name+' and their position is '+onGround+' '+distance+'. The altitude of the aircraft is '+seaAltitude()+' feet above the sea level ('+groundAltitude()+' feet above ground). ' +
-            'The plane is '+movingSpeed+'. Wind speed is '+wind+'. Air temperature is '+unsafeWindow.geofs.animation.values.airTemp+' degrees celsius. '+
-            'You should address them with "'+address+'", followed by the message.';
+            if (context[airport.code].length >= 4) {
+                context[airport.code].splice(-3, 1);
+            }
 
-        if (context[airport.code].length >= 4) {
-            context[airport.code].splice(-3, 1);
-        }
+            context[airport.code].push({content: currentUpdate, role: 'system'});
+            context[airport.code].push({content: pilotMsg, role: 'user'});
 
-        context[airport.code].push({content: currentUpdate, role: 'system'});
-        context[airport.code].push({content: pilotMsg, role: 'user'});
+            pilotMessage(pilotMsg);
 
-        pilotMessage(pilotMsg);
-
-        puter.ai.chat(context[airport.code]).then(function(resp) {
-            context[airport.code].push(resp.message);
-            atcMessage(resp.message.content, airport.code);
+            puter.ai.chat(context[airport.code]).then(function(resp) {
+                context[airport.code].push(resp.message);
+                atcMessage(resp.message.content, airport.code);
+            });
         });
     }
 
 })();
+
